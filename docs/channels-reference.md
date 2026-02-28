@@ -487,6 +487,14 @@ access_token = ""                         # optional
 allowed_users = ["*"]
 ```
 
+Compatibility alias:
+
+```toml
+[channels_config.onebot]
+websocket_url = "ws://127.0.0.1:3001"
+access_token = ""
+```
+
 Notes:
 
 - Inbound messages are consumed from Napcat's WebSocket stream.

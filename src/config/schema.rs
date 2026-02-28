@@ -3905,6 +3905,9 @@ pub struct ChannelsConfig {
     /// DingTalk channel configuration.
     pub dingtalk: Option<DingTalkConfig>,
     /// Napcat QQ protocol channel configuration.
+    ///
+    /// Backward-compatible alias: `[channels_config.onebot]`.
+    #[serde(alias = "onebot")]
     pub napcat: Option<NapcatConfig>,
     /// QQ Official Bot channel configuration.
     pub qq: Option<QQConfig>,
@@ -9907,6 +9910,26 @@ channel_id = "C123"
     async fn channels_config_default_has_no_nextcloud_talk() {
         let c = ChannelsConfig::default();
         assert!(c.nextcloud_talk.is_none());
+    }
+
+    #[test]
+    async fn channels_config_accepts_onebot_alias_for_napcat() {
+        let toml_str = r#"
+cli = true
+
+[onebot]
+websocket_url = "ws://127.0.0.1:3001"
+api_base_url = "http://127.0.0.1:3001"
+access_token = "token"
+allowed_users = ["*"]
+"#;
+
+        let parsed: ChannelsConfig = toml::from_str(toml_str).unwrap();
+        let napcat = parsed.napcat.expect("onebot alias should map to napcat");
+        assert_eq!(napcat.websocket_url, "ws://127.0.0.1:3001");
+        assert_eq!(napcat.api_base_url, "http://127.0.0.1:3001");
+        assert_eq!(napcat.access_token.as_deref(), Some("token"));
+        assert_eq!(napcat.allowed_users, vec!["*"]);
     }
 
     // ══════════════════════════════════════════════════════════
