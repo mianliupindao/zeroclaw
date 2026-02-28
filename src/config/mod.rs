@@ -10,7 +10,7 @@ pub use schema::{
     CoordinationConfig, CostConfig, CronConfig, DelegateAgentConfig, DiscordConfig,
     DockerRuntimeConfig, EconomicConfig, EconomicTokenPricing, EmbeddingRouteConfig, EstopConfig,
     FeishuConfig, GatewayConfig, GroupReplyConfig, GroupReplyMode, HardwareConfig,
-    HardwareTransport, HeartbeatConfig, HooksConfig, HttpRequestConfig,
+    GitHubConfig, HardwareTransport, HeartbeatConfig, HooksConfig, HttpRequestConfig,
     HttpRequestCredentialProfile, IMessageConfig, IdentityConfig, LarkConfig, MatrixConfig,
     MemoryConfig, ModelRouteConfig, MultimodalConfig, NextcloudTalkConfig,
     NonCliNaturalLanguageApprovalMode, ObservabilityConfig, OtpChallengeDelivery, OtpConfig,

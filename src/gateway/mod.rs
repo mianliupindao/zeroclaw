@@ -15,7 +15,7 @@ pub mod static_files;
 pub mod ws;
 
 use crate::channels::{
-    Channel, LinqChannel, NextcloudTalkChannel, QQChannel, SendMessage, WatiChannel,
+    Channel, GitHubChannel, LinqChannel, NextcloudTalkChannel, QQChannel, SendMessage, WatiChannel,
     WhatsAppChannel,
 };
 use crate::config::Config;
@@ -82,11 +82,44 @@ fn qq_memory_key(msg: &crate::channels::traits::ChannelMessage) -> String {
     format!("qq_{}_{}", msg.sender, msg.id)
 }
 
+fn github_memory_key(msg: &crate::channels::traits::ChannelMessage) -> String {
+    format!("github_{}_{}", msg.sender, msg.id)
+}
+
 fn hash_webhook_secret(value: &str) -> String {
     use sha2::{Digest, Sha256};
 
     let digest = Sha256::digest(value.as_bytes());
     hex::encode(digest)
+}
+
+fn build_github_channel(config: &Config) -> Option<GitHubChannel> {
+    let github_cfg = config.channels_config.github.as_ref()?;
+
+    let api_token = std::env::var("ZEROCLAW_GITHUB_API_TOKEN")
+        .ok()
+        .and_then(|value| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        })
+        .unwrap_or_else(|| github_cfg.api_token.clone());
+
+    let webhook_secret = std::env::var("ZEROCLAW_GITHUB_WEBHOOK_SECRET")
+        .ok()
+        .and_then(|value| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        })
+        .or_else(|| github_cfg.webhook_secret.clone());
+
+    Some(GitHubChannel::new(
+        api_token,
+        github_cfg.api_base_url.clone(),
+        webhook_secret,
+        github_cfg.allowed_repos.clone(),
+        github_cfg.allowed_users.clone(),
+        github_cfg.bot_login.clone(),
+    ))
 }
 
 /// How often the rate limiter sweeps stale IP entries from its map.
@@ -632,6 +665,9 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     if qq_webhook_enabled {
         println!("  POST /qq        — QQ Bot webhook (validation + events)");
     }
+    if config.channels_config.github.is_some() {
+        println!("  POST /github    — GitHub webhook (issues + PR comments)");
+    }
     if config.gateway.node_control.enabled {
         println!("  POST /api/node-control — experimental node-control RPC scaffold");
     }
@@ -738,6 +774,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .route("/wati", post(handle_wati_webhook))
         .route("/nextcloud-talk", post(handle_nextcloud_talk_webhook))
         .route("/qq", post(handle_qq_webhook))
+        .route("/github", post(handle_github_webhook))
         // ── OpenClaw migration: tools-enabled chat endpoint ──
         .route("/api/chat", post(openclaw_compat::handle_api_chat))
         // ── OpenAI-compatible endpoints ──
@@ -2302,6 +2339,148 @@ async fn handle_qq_webhook(
     (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
 }
 
+/// POST /github — incoming GitHub webhook (issue_comment + pull_request_review_comment)
+async fn handle_github_webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let github = {
+        let config = state.config.lock();
+        build_github_channel(&config)
+    };
+    let Some(github) = github else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "GitHub channel not configured"})),
+        );
+    };
+
+    let event = headers
+        .get("X-GitHub-Event")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .unwrap_or("");
+    if event.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Missing X-GitHub-Event header"})),
+        );
+    }
+
+    if let Some(secret) = github.webhook_secret() {
+        let signature = headers
+            .get("X-Hub-Signature-256")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("");
+        if !crate::channels::github::verify_github_signature(secret, body.as_ref(), signature) {
+            tracing::warn!(
+                "GitHub webhook signature verification failed (signature: {})",
+                if signature.is_empty() {
+                    "missing"
+                } else {
+                    "invalid"
+                }
+            );
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Invalid signature"})),
+            );
+        }
+    }
+
+    if let Some(delivery_id) = headers
+        .get("X-GitHub-Delivery")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let idempotency_key = format!("github:{delivery_id}");
+        if !state.idempotency_store.record_if_new(&idempotency_key) {
+            tracing::info!("GitHub duplicate ignored (delivery id: {delivery_id})");
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({"status": "duplicate", "event": event})),
+            );
+        }
+    }
+
+    if event == "ping" {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "ok", "event": "ping"})),
+        );
+    }
+
+    let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid JSON payload"})),
+        );
+    };
+
+    let messages = github.parse_webhook_payload(event, &payload);
+    if messages.is_empty() {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "ignored", "event": event})),
+        );
+    }
+
+    for msg in &messages {
+        tracing::info!(
+            "GitHub webhook message from {}: {}",
+            msg.sender,
+            truncate_with_ellipsis(&msg.content, 80)
+        );
+
+        if state.auto_save {
+            let key = github_memory_key(msg);
+            let _ = state
+                .mem
+                .store(&key, &msg.content, MemoryCategory::Conversation, None)
+                .await;
+        }
+
+        match run_gateway_chat_with_tools(&state, &msg.content).await {
+            Ok(response) => {
+                let leak_guard_cfg = gateway_outbound_leak_guard_snapshot(&state);
+                let safe_response = sanitize_gateway_response(
+                    &response,
+                    state.tools_registry_exec.as_ref(),
+                    &leak_guard_cfg,
+                );
+                if let Err(error) = github
+                    .send(
+                        &SendMessage::new(safe_response, &msg.reply_target)
+                            .in_thread(msg.thread_ts.clone()),
+                    )
+                    .await
+                {
+                    tracing::error!("Failed to send GitHub reply: {error}");
+                }
+            }
+            Err(error) => {
+                tracing::error!("LLM error for GitHub webhook message: {error:#}");
+                let _ = github
+                    .send(
+                        &SendMessage::new(
+                            "Sorry, I couldn't process your message right now.",
+                            &msg.reply_target,
+                        )
+                        .in_thread(msg.thread_ts.clone()),
+                    )
+                    .await;
+            }
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"status": "ok", "event": event})),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3837,6 +4016,114 @@ Reminder set successfully."#;
             parsed["signature"],
             "87befc99c42c651b3aac0278e71ada338433ae26fcb24307bdc5ad38c1adc2d01bcfcadc0842edac85e85205028a1132afe09280305f13aa6909ffc2d652c706"
         );
+        assert_eq!(provider_impl.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn github_webhook_returns_not_found_when_not_configured() {
+        let provider: Arc<dyn Provider> = Arc::new(MockProvider::default());
+        let memory: Arc<dyn Memory> = Arc::new(MockMemory);
+        let state = AppState {
+            config: Arc::new(Mutex::new(Config::default())),
+            provider,
+            model: "test-model".into(),
+            temperature: 0.0,
+            mem: memory,
+            auto_save: false,
+            webhook_secret_hash: None,
+            pairing: Arc::new(PairingGuard::new(false, &[])),
+            trust_forwarded_headers: false,
+            rate_limiter: Arc::new(GatewayRateLimiter::new(100, 100, 100)),
+            idempotency_store: Arc::new(IdempotencyStore::new(Duration::from_secs(300), 1000)),
+            whatsapp: None,
+            whatsapp_app_secret: None,
+            linq: None,
+            linq_signing_secret: None,
+            nextcloud_talk: None,
+            nextcloud_talk_webhook_secret: None,
+            wati: None,
+            qq: None,
+            qq_webhook_enabled: false,
+            observer: Arc::new(crate::observability::NoopObserver),
+            tools_registry: Arc::new(Vec::new()),
+            tools_registry_exec: Arc::new(Vec::new()),
+            multimodal: crate::config::MultimodalConfig::default(),
+            max_tool_iterations: 10,
+            cost_tracker: None,
+            event_tx: tokio::sync::broadcast::channel(16).0,
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert("X-GitHub-Event", HeaderValue::from_static("issue_comment"));
+        let response = handle_github_webhook(
+            State(state),
+            headers,
+            Bytes::from_static(br#"{"action":"created"}"#),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn github_webhook_rejects_invalid_signature() {
+        let provider_impl = Arc::new(MockProvider::default());
+        let provider: Arc<dyn Provider> = provider_impl.clone();
+        let memory: Arc<dyn Memory> = Arc::new(MockMemory);
+        let mut config = Config::default();
+        config.channels_config.github = Some(crate::config::GitHubConfig {
+            api_token: "ghp_test_token".into(),
+            api_base_url: "https://api.github.com".into(),
+            webhook_secret: Some("github-secret".into()),
+            allowed_repos: vec!["zeroclaw-labs/zeroclaw".into()],
+            allowed_users: vec!["*".into()],
+            bot_login: None,
+        });
+
+        let state = AppState {
+            config: Arc::new(Mutex::new(config)),
+            provider,
+            model: "test-model".into(),
+            temperature: 0.0,
+            mem: memory,
+            auto_save: false,
+            webhook_secret_hash: None,
+            pairing: Arc::new(PairingGuard::new(false, &[])),
+            trust_forwarded_headers: false,
+            rate_limiter: Arc::new(GatewayRateLimiter::new(100, 100, 100)),
+            idempotency_store: Arc::new(IdempotencyStore::new(Duration::from_secs(300), 1000)),
+            whatsapp: None,
+            whatsapp_app_secret: None,
+            linq: None,
+            linq_signing_secret: None,
+            nextcloud_talk: None,
+            nextcloud_talk_webhook_secret: None,
+            wati: None,
+            qq: None,
+            qq_webhook_enabled: false,
+            observer: Arc::new(crate::observability::NoopObserver),
+            tools_registry: Arc::new(Vec::new()),
+            tools_registry_exec: Arc::new(Vec::new()),
+            multimodal: crate::config::MultimodalConfig::default(),
+            max_tool_iterations: 10,
+            cost_tracker: None,
+            event_tx: tokio::sync::broadcast::channel(16).0,
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert("X-GitHub-Event", HeaderValue::from_static("issue_comment"));
+        headers.insert(
+            "X-Hub-Signature-256",
+            HeaderValue::from_static("sha256=deadbeef"),
+        );
+        let response = handle_github_webhook(
+            State(state),
+            headers,
+            Bytes::from_static(br#"{"action":"created"}"#),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(provider_impl.calls.load(Ordering::SeqCst), 0);
     }
 

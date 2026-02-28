@@ -26,6 +26,7 @@ const SUPPORTED_PROXY_SERVICE_KEYS: &[&str] = &[
     "channel.dingtalk",
     "channel.discord",
     "channel.feishu",
+    "channel.github",
     "channel.lark",
     "channel.matrix",
     "channel.mattermost",
@@ -404,6 +405,7 @@ impl std::fmt::Debug for Config {
             self.channels_config.whatsapp.is_some(),
             self.channels_config.linq.is_some(),
             self.channels_config.wati.is_some(),
+            self.channels_config.github.is_some(),
             self.channels_config.nextcloud_talk.is_some(),
             self.channels_config.email.is_some(),
             self.channels_config.irc.is_some(),
@@ -3892,6 +3894,8 @@ pub struct ChannelsConfig {
     pub linq: Option<LinqConfig>,
     /// WATI WhatsApp Business API channel configuration.
     pub wati: Option<WatiConfig>,
+    /// GitHub Issues/PR comments channel configuration.
+    pub github: Option<GitHubConfig>,
     /// Nextcloud Talk bot channel configuration.
     pub nextcloud_talk: Option<NextcloudTalkConfig>,
     /// Email channel configuration.
@@ -3964,6 +3968,10 @@ impl ChannelsConfig {
             (
                 Box::new(ConfigWrapper::new(self.wati.as_ref())),
                 self.wati.is_some(),
+            ),
+            (
+                Box::new(ConfigWrapper::new(self.github.as_ref())),
+                self.github.is_some(),
             ),
             (
                 Box::new(ConfigWrapper::new(self.nextcloud_talk.as_ref())),
@@ -4039,6 +4047,7 @@ impl Default for ChannelsConfig {
             whatsapp: None,
             linq: None,
             wati: None,
+            github: None,
             nextcloud_talk: None,
             email: None,
             irc: None,
@@ -4520,6 +4529,51 @@ impl ChannelConfig for WatiConfig {
     }
     fn desc() -> &'static str {
         "WhatsApp via WATI Business API"
+    }
+}
+
+fn default_github_api_base_url() -> String {
+    "https://api.github.com".to_string()
+}
+
+/// GitHub channel configuration (webhook receive + REST send API).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GitHubConfig {
+    /// GitHub token used for outbound comment replies.
+    ///
+    /// Can also be set via `ZEROCLAW_GITHUB_API_TOKEN`.
+    pub api_token: String,
+    /// GitHub REST API base URL.
+    ///
+    /// Defaults to `https://api.github.com`. Override for GitHub Enterprise.
+    #[serde(default = "default_github_api_base_url")]
+    pub api_base_url: String,
+    /// Shared webhook secret used to validate `X-Hub-Signature-256`.
+    ///
+    /// Can also be set via `ZEROCLAW_GITHUB_WEBHOOK_SECRET`.
+    #[serde(default)]
+    pub webhook_secret: Option<String>,
+    /// Allowed repositories (`owner/repo`).
+    ///
+    /// `[]` means deny all, `"*"` allows all repositories.
+    #[serde(default)]
+    pub allowed_repos: Vec<String>,
+    /// Allowed GitHub usernames for inbound comments.
+    ///
+    /// `[]` means deny all, `"*"` allows all users.
+    #[serde(default)]
+    pub allowed_users: Vec<String>,
+    /// Optional bot login. If set, comments authored by this login are ignored.
+    #[serde(default)]
+    pub bot_login: Option<String>,
+}
+
+impl ChannelConfig for GitHubConfig {
+    fn name() -> &'static str {
+        "GitHub"
+    }
+    fn desc() -> &'static str {
+        "Issues and PR comments via GitHub webhooks"
     }
 }
 
@@ -6033,6 +6087,18 @@ fn decrypt_channel_secrets(
             "config.channels_config.linq.signing_secret",
         )?;
     }
+    if let Some(ref mut github) = channels.github {
+        decrypt_secret(
+            store,
+            &mut github.api_token,
+            "config.channels_config.github.api_token",
+        )?;
+        decrypt_optional_secret(
+            store,
+            &mut github.webhook_secret,
+            "config.channels_config.github.webhook_secret",
+        )?;
+    }
     if let Some(ref mut nextcloud) = channels.nextcloud_talk {
         decrypt_secret(
             store,
@@ -6200,6 +6266,18 @@ fn encrypt_channel_secrets(
             store,
             &mut linq.signing_secret,
             "config.channels_config.linq.signing_secret",
+        )?;
+    }
+    if let Some(ref mut github) = channels.github {
+        encrypt_secret(
+            store,
+            &mut github.api_token,
+            "config.channels_config.github.api_token",
+        )?;
+        encrypt_optional_secret(
+            store,
+            &mut github.webhook_secret,
+            "config.channels_config.github.webhook_secret",
         )?;
     }
     if let Some(ref mut nextcloud) = channels.nextcloud_talk {
@@ -8669,6 +8747,7 @@ default_temperature = 0.7
                 whatsapp: None,
                 linq: None,
                 wati: None,
+                github: None,
                 nextcloud_talk: None,
                 email: None,
                 irc: None,
@@ -9598,6 +9677,7 @@ allowed_users = ["@ops:matrix.org"]
             whatsapp: None,
             linq: None,
             wati: None,
+            github: None,
             nextcloud_talk: None,
             email: None,
             irc: None,
@@ -9877,6 +9957,7 @@ channel_id = "C123"
             }),
             linq: None,
             wati: None,
+            github: None,
             nextcloud_talk: None,
             email: None,
             irc: None,
@@ -11995,6 +12076,38 @@ default_model = "legacy-model"
             .find_map(|(handle, enabled)| (handle.name() == "DingTalk").then_some(*enabled));
 
         assert_eq!(dingtalk_state, Some(true));
+    }
+
+    #[test]
+    async fn github_config_serde() {
+        let gh = GitHubConfig {
+            api_token: "ghp_token".into(),
+            api_base_url: "https://api.github.com".into(),
+            webhook_secret: Some("hook-secret".into()),
+            allowed_repos: vec!["zeroclaw-labs/zeroclaw".into()],
+            allowed_users: vec!["theonlyhennygod".into()],
+            bot_login: Some("zeroclaw-bot".into()),
+        };
+
+        let json = serde_json::to_string(&gh).unwrap();
+        let parsed: GitHubConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.api_token, "ghp_token");
+        assert_eq!(parsed.api_base_url, "https://api.github.com");
+        assert_eq!(parsed.webhook_secret.as_deref(), Some("hook-secret"));
+        assert_eq!(parsed.allowed_repos, vec!["zeroclaw-labs/zeroclaw"]);
+        assert_eq!(parsed.allowed_users, vec!["theonlyhennygod"]);
+        assert_eq!(parsed.bot_login.as_deref(), Some("zeroclaw-bot"));
+    }
+
+    #[test]
+    async fn github_config_defaults_optional_fields() {
+        let json = r#"{"api_token":"ghp_token"}"#;
+        let parsed: GitHubConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.api_base_url, "https://api.github.com");
+        assert!(parsed.webhook_secret.is_none());
+        assert!(parsed.allowed_repos.is_empty());
+        assert!(parsed.allowed_users.is_empty());
+        assert!(parsed.bot_login.is_none());
     }
 
     #[test]

@@ -143,6 +143,7 @@ If `[channels_config.matrix]`, `[channels_config.lark]`, or `[channels_config.fe
 | Feishu | websocket (default) or webhook | Webhook mode only |
 | DingTalk | stream mode | No |
 | QQ | bot gateway | No |
+| GitHub | webhook (`/github`) | Yes (public HTTPS callback) |
 | Napcat | websocket receive + HTTP send (OneBot) | No (typically local/LAN) |
 | Linq | webhook (`/linq`) | Yes (public HTTPS callback) |
 | iMessage | local integration | No |
@@ -164,6 +165,7 @@ Field names differ by channel:
 - `allowed_from` (Signal)
 - `allowed_numbers` (WhatsApp)
 - `allowed_senders` (Email/Linq)
+- `allowed_repos` (GitHub)
 - `allowed_contacts` (iMessage)
 - `allowed_pubkeys` (Nostr)
 
@@ -477,7 +479,28 @@ Notes:
 - `X-Bot-Appid` is checked when present and must match `app_id`.
 - Set `receive_mode = "websocket"` to keep the legacy gateway WS receive path.
 
-### 4.16 Napcat (QQ via OneBot)
+### 4.16 GitHub
+
+```toml
+[channels_config.github]
+api_token = "ghp_xxx"
+api_base_url = "https://api.github.com"      # optional
+webhook_secret = "optional-webhook-secret"   # optional but recommended
+allowed_repos = ["zeroclaw-labs/zeroclaw"]   # [] denies all, "*" allows all
+allowed_users = ["*"]                        # [] denies all, "*" allows all
+bot_login = "zeroclaw-bot"                   # optional; ignores self-authored comments
+```
+
+Notes:
+
+- Inbound webhook endpoint: `POST /github`.
+- Supported inbound events: `issue_comment` and `pull_request_review_comment` (`action=created`).
+- Outbound replies are posted to the corresponding issue/PR thread.
+- Signature verification uses `X-Hub-Signature-256` when `webhook_secret` is set.
+- `ZEROCLAW_GITHUB_API_TOKEN` and `ZEROCLAW_GITHUB_WEBHOOK_SECRET` override config values.
+- `X-GitHub-Delivery` is used as idempotency key when present.
+
+### 4.17 Napcat (QQ via OneBot)
 
 ```toml
 [channels_config.napcat]
@@ -496,7 +519,7 @@ Notes:
   - `group:<qq_group_id>` for group messages
 - Outbound reply chaining uses incoming message ids via CQ reply tags.
 
-### 4.17 Nextcloud Talk
+### 4.18 Nextcloud Talk
 
 ```toml
 [channels_config.nextcloud_talk]
@@ -514,7 +537,7 @@ Notes:
 - `ZEROCLAW_NEXTCLOUD_TALK_WEBHOOK_SECRET` overrides config secret.
 - See [nextcloud-talk-setup.md](./nextcloud-talk-setup.md) for a full runbook.
 
-### 4.18 Linq
+### 4.19 Linq
 
 ```toml
 [channels_config.linq]
@@ -533,7 +556,7 @@ Notes:
 - `ZEROCLAW_LINQ_SIGNING_SECRET` overrides config secret.
 - `allowed_senders` uses E.164 phone number format (e.g. `+1234567890`).
 
-### 4.19 iMessage
+### 4.20 iMessage
 
 ```toml
 [channels_config.imessage]
@@ -608,6 +631,7 @@ rg -n "Matrix|Telegram|Discord|Slack|Mattermost|Signal|WhatsApp|Email|IRC|Lark|D
 | Lark / Feishu | `Lark: WS connected` / `Lark event callback server listening on` | `Lark WS: ignoring ... (not in allowed_users)` / `Lark: ignoring message from unauthorized user:` | `Lark: ping failed, reconnecting` / `Lark: heartbeat timeout, reconnecting` / `Lark: WS read error:` |
 | DingTalk | `DingTalk: connected and listening for messages...` | `DingTalk: ignoring message from unauthorized user:` | `DingTalk WebSocket error:` / `DingTalk: message channel closed` |
 | QQ | `QQ: connected and identified` | `QQ: ignoring C2C message from unauthorized user:` / `QQ: ignoring group message from unauthorized user:` | `QQ: received Reconnect (op 7)` / `QQ: received Invalid Session (op 9)` / `QQ: message channel closed` |
+| GitHub (gateway) | `POST /github — GitHub webhook (issues + PR comments)` | `GitHub webhook signature verification failed` / `GitHub: ignoring webhook from unauthorized repository:` / `GitHub: ignoring webhook from unauthorized sender:` | `Failed to send GitHub reply:` / `LLM error for GitHub webhook message:` |
 | Nextcloud Talk (gateway) | `POST /nextcloud-talk — Nextcloud Talk bot webhook` | `Nextcloud Talk webhook signature verification failed` / `Nextcloud Talk: ignoring message from unauthorized actor:` | `Nextcloud Talk send failed:` / `LLM error for Nextcloud Talk message:` |
 | iMessage | `iMessage channel listening (AppleScript bridge)...` | (contact allowlist enforced by `allowed_contacts`) | `iMessage poll error:` |
 | Nostr | `Nostr channel listening as npub1...` | `Nostr: ignoring NIP-04 message from unauthorized pubkey:` / `Nostr: ignoring NIP-17 message from unauthorized pubkey:` | `Failed to decrypt NIP-04 message:` / `Failed to unwrap NIP-17 gift wrap:` / `Nostr relay pool shut down` |

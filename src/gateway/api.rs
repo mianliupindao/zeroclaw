@@ -700,6 +700,10 @@ fn mask_sensitive_fields(config: &crate::config::Config) -> crate::config::Confi
     if let Some(wati) = masked.channels_config.wati.as_mut() {
         mask_required_secret(&mut wati.api_token);
     }
+    if let Some(github) = masked.channels_config.github.as_mut() {
+        mask_required_secret(&mut github.api_token);
+        mask_optional_secret(&mut github.webhook_secret);
+    }
     if let Some(nextcloud) = masked.channels_config.nextcloud_talk.as_mut() {
         mask_required_secret(&mut nextcloud.app_token);
         mask_optional_secret(&mut nextcloud.webhook_secret);
@@ -863,6 +867,13 @@ fn restore_masked_sensitive_fields(
         current.channels_config.wati.as_ref(),
     ) {
         restore_required_secret(&mut incoming_ch.api_token, &current_ch.api_token);
+    }
+    if let (Some(incoming_ch), Some(current_ch)) = (
+        incoming.channels_config.github.as_mut(),
+        current.channels_config.github.as_ref(),
+    ) {
+        restore_required_secret(&mut incoming_ch.api_token, &current_ch.api_token);
+        restore_optional_secret(&mut incoming_ch.webhook_secret, &current_ch.webhook_secret);
     }
     if let (Some(incoming_ch), Some(current_ch)) = (
         incoming.channels_config.nextcloud_talk.as_mut(),
@@ -1035,7 +1046,7 @@ mod tests {
     }
 
     #[test]
-    fn mask_sensitive_fields_covers_wati_email_and_feishu_secrets() {
+    fn mask_sensitive_fields_covers_wati_github_email_and_feishu_secrets() {
         let mut cfg = crate::config::Config::default();
         cfg.proxy.http_proxy = Some("http://user:pass@proxy.internal:8080".to_string());
         cfg.proxy.https_proxy = Some("https://user:pass@proxy.internal:8443".to_string());
@@ -1058,6 +1069,14 @@ mod tests {
             api_url: "https://live-mt-server.wati.io".to_string(),
             tenant_id: Some("tenant-1".to_string()),
             allowed_numbers: vec!["*".to_string()],
+        });
+        cfg.channels_config.github = Some(crate::config::GitHubConfig {
+            api_token: "ghp-real-token".to_string(),
+            api_base_url: "https://api.github.com".to_string(),
+            webhook_secret: Some("github-webhook-secret".to_string()),
+            allowed_repos: vec!["zeroclaw-labs/zeroclaw".to_string()],
+            allowed_users: vec!["*".to_string()],
+            bot_login: Some("zeroclaw-bot".to_string()),
         });
         let mut email = crate::channels::email_channel::EmailConfig::default();
         email.password = "email-real-password".to_string();
@@ -1125,6 +1144,22 @@ mod tests {
         assert_eq!(
             masked
                 .channels_config
+                .github
+                .as_ref()
+                .map(|value| value.api_token.as_str()),
+            Some(MASKED_SECRET)
+        );
+        assert_eq!(
+            masked
+                .channels_config
+                .github
+                .as_ref()
+                .and_then(|value| value.webhook_secret.as_deref()),
+            Some(MASKED_SECRET)
+        );
+        assert_eq!(
+            masked
+                .channels_config
                 .email
                 .as_ref()
                 .map(|value| value.password.as_str()),
@@ -1144,7 +1179,7 @@ mod tests {
     }
 
     #[test]
-    fn hydrate_config_for_save_restores_wati_email_and_feishu_secrets() {
+    fn hydrate_config_for_save_restores_wati_github_email_and_feishu_secrets() {
         let mut current = crate::config::Config::default();
         current.proxy.http_proxy = Some("http://user:pass@proxy.internal:8080".to_string());
         current.proxy.https_proxy = Some("https://user:pass@proxy.internal:8443".to_string());
@@ -1166,6 +1201,14 @@ mod tests {
             api_url: "https://live-mt-server.wati.io".to_string(),
             tenant_id: Some("tenant-1".to_string()),
             allowed_numbers: vec!["*".to_string()],
+        });
+        current.channels_config.github = Some(crate::config::GitHubConfig {
+            api_token: "ghp-real-token".to_string(),
+            api_base_url: "https://api.github.com".to_string(),
+            webhook_secret: Some("github-webhook-secret".to_string()),
+            allowed_repos: vec!["zeroclaw-labs/zeroclaw".to_string()],
+            allowed_users: vec!["*".to_string()],
+            bot_login: Some("zeroclaw-bot".to_string()),
         });
         let mut email = crate::channels::email_channel::EmailConfig::default();
         email.password = "email-real-password".to_string();
@@ -1242,6 +1285,22 @@ mod tests {
                 .as_ref()
                 .map(|value| value.api_token.as_str()),
             Some("wati-real-token")
+        );
+        assert_eq!(
+            restored
+                .channels_config
+                .github
+                .as_ref()
+                .map(|value| value.api_token.as_str()),
+            Some("ghp-real-token")
+        );
+        assert_eq!(
+            restored
+                .channels_config
+                .github
+                .as_ref()
+                .and_then(|value| value.webhook_secret.as_deref()),
+            Some("github-webhook-secret")
         );
         assert_eq!(
             restored
