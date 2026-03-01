@@ -3935,6 +3935,12 @@ pub struct HeartbeatConfig {
     pub enabled: bool,
     /// Interval in minutes between heartbeat pings. Default: `30`.
     pub interval_minutes: u32,
+    /// Maximum heartbeat tasks to execute per tick. Default: `3`.
+    #[serde(default = "default_heartbeat_max_tasks_per_tick")]
+    pub max_tasks_per_tick: usize,
+    /// Skip duplicate task text within this cooldown window (minutes). Default: `0` (disabled).
+    #[serde(default = "default_heartbeat_dedupe_window_minutes")]
+    pub dedupe_window_minutes: u32,
     /// Optional fallback task text when `HEARTBEAT.md` has no task entries.
     #[serde(default)]
     pub message: Option<String>,
@@ -3946,11 +3952,21 @@ pub struct HeartbeatConfig {
     pub to: Option<String>,
 }
 
+fn default_heartbeat_max_tasks_per_tick() -> usize {
+    3
+}
+
+fn default_heartbeat_dedupe_window_minutes() -> u32 {
+    0
+}
+
 impl Default for HeartbeatConfig {
     fn default() -> Self {
         Self {
             enabled: false,
             interval_minutes: 30,
+            max_tasks_per_tick: default_heartbeat_max_tasks_per_tick(),
+            dedupe_window_minutes: default_heartbeat_dedupe_window_minutes(),
             message: None,
             target: None,
             to: None,
@@ -7861,6 +7877,12 @@ impl Config {
         }
 
         // Scheduler
+        if self.heartbeat.interval_minutes == 0 {
+            anyhow::bail!("heartbeat.interval_minutes must be greater than 0");
+        }
+        if self.heartbeat.max_tasks_per_tick == 0 {
+            anyhow::bail!("heartbeat.max_tasks_per_tick must be greater than 0");
+        }
         if self.scheduler.max_concurrent == 0 {
             anyhow::bail!("scheduler.max_concurrent must be greater than 0");
         }
@@ -9314,6 +9336,8 @@ allowed_roots = []
         let h = HeartbeatConfig::default();
         assert!(!h.enabled);
         assert_eq!(h.interval_minutes, 30);
+        assert_eq!(h.max_tasks_per_tick, 3);
+        assert_eq!(h.dedupe_window_minutes, 0);
         assert!(h.message.is_none());
         assert!(h.target.is_none());
         assert!(h.to.is_none());
@@ -9324,6 +9348,8 @@ allowed_roots = []
         let raw = r#"
 enabled = true
 interval_minutes = 10
+max_tasks_per_tick = 5
+dedupe_window_minutes = 30
 message = "Ping"
 channel = "telegram"
 recipient = "42"
@@ -9331,6 +9357,8 @@ recipient = "42"
         let parsed: HeartbeatConfig = toml::from_str(raw).unwrap();
         assert!(parsed.enabled);
         assert_eq!(parsed.interval_minutes, 10);
+        assert_eq!(parsed.max_tasks_per_tick, 5);
+        assert_eq!(parsed.dedupe_window_minutes, 30);
         assert_eq!(parsed.message.as_deref(), Some("Ping"));
         assert_eq!(parsed.target.as_deref(), Some("telegram"));
         assert_eq!(parsed.to.as_deref(), Some("42"));
@@ -9496,6 +9524,8 @@ ws_url = "ws://127.0.0.1:3002"
             heartbeat: HeartbeatConfig {
                 enabled: true,
                 interval_minutes: 15,
+                max_tasks_per_tick: 4,
+                dedupe_window_minutes: 10,
                 message: Some("Check London time".into()),
                 target: Some("telegram".into()),
                 to: Some("123456".into()),
@@ -9583,6 +9613,8 @@ ws_url = "ws://127.0.0.1:3002"
         assert_eq!(parsed.runtime.kind, "docker");
         assert!(parsed.heartbeat.enabled);
         assert_eq!(parsed.heartbeat.interval_minutes, 15);
+        assert_eq!(parsed.heartbeat.max_tasks_per_tick, 4);
+        assert_eq!(parsed.heartbeat.dedupe_window_minutes, 10);
         assert_eq!(
             parsed.heartbeat.message.as_deref(),
             Some("Check London time")
@@ -9611,6 +9643,8 @@ default_temperature = 0.7
         assert_eq!(parsed.autonomy.level, AutonomyLevel::Supervised);
         assert_eq!(parsed.runtime.kind, "native");
         assert!(!parsed.heartbeat.enabled);
+        assert_eq!(parsed.heartbeat.max_tasks_per_tick, 3);
+        assert_eq!(parsed.heartbeat.dedupe_window_minutes, 0);
         assert!(parsed.channels_config.cli);
         assert!(parsed.memory.hygiene_enabled);
         assert_eq!(parsed.memory.archive_after_days, 7);
@@ -13701,6 +13735,19 @@ sensitivity = 0.9
             .validate()
             .expect_err("expected syscall cooldown validation failure");
         assert!(err.to_string().contains("alert_cooldown_secs"));
+    }
+
+    #[test]
+    async fn heartbeat_validation_rejects_zero_max_tasks_per_tick() {
+        let mut config = Config::default();
+        config.heartbeat.max_tasks_per_tick = 0;
+
+        let err = config
+            .validate()
+            .expect_err("expected heartbeat max_tasks_per_tick validation failure");
+        assert!(err
+            .to_string()
+            .contains("heartbeat.max_tasks_per_tick must be greater than 0"));
     }
 
     #[test]
