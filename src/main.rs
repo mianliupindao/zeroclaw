@@ -59,6 +59,7 @@ fn parse_temperature(s: &str) -> std::result::Result<f64, String> {
     Ok(t)
 }
 
+mod acp_server;
 mod agent;
 mod approval;
 mod auth;
@@ -250,6 +251,22 @@ Examples:
         #[arg(long)]
         memory_backend: Option<String>,
     },
+
+    /// Start ACP (Agent Control Protocol) server over stdio
+    #[command(long_about = "\
+Start ZeroClaw in ACP (Agent Control Protocol) server mode.
+
+Runs a JSON-RPC 2.0 server over stdio for IDE integrations and ACP-compatible clients.
+Supported methods:
+  - initialize
+  - session/new
+  - session/prompt
+  - session/stop
+
+Examples:
+  zeroclaw acp
+  zeroclaw acp < request.jsonl")]
+    Acp,
 
     /// Start the gateway server (webhooks, websockets)
     #[command(long_about = "\
@@ -985,6 +1002,8 @@ async fn main() -> Result<()> {
             .await
             .map(|_| ())
         }
+
+        Commands::Acp => acp_server::run_stdio(config).await,
 
         Commands::Gateway {
             port,
@@ -2404,6 +2423,15 @@ mod tests {
             has_new_pairing_flag,
             "gateway help should include --new-pairing"
         );
+    }
+
+    #[test]
+    fn acp_cli_parses_subcommand() {
+        let cli = Cli::try_parse_from(["zeroclaw", "acp"]).expect("acp subcommand should parse");
+        match cli.command {
+            Commands::Acp => {}
+            other => panic!("expected acp command, got {other:?}"),
+        }
     }
 
     #[test]
