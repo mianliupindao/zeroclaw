@@ -77,13 +77,6 @@ pub struct WhatsAppWebChannel {
     transcription_manager: Option<std::sync::Arc<super::transcription::TranscriptionManager>>,
     /// Text-to-speech config for voice replies
     tts_config: Option<crate::config::TtsConfig>,
-    /// Chats awaiting a voice reply — maps chat JID to the latest substantive
-    /// reply text. A background task debounces and sends the voice note after
-    /// the agent finishes its turn (no new send() for 3 seconds).
-    pending_voice:
-        Arc<std::sync::Mutex<std::collections::HashMap<String, (String, std::time::Instant)>>>,
-    /// Chats whose last incoming message was a voice note.
-    voice_chats: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl WhatsAppWebChannel {
@@ -125,8 +118,6 @@ impl WhatsAppWebChannel {
             transcription: None,
             transcription_manager: None,
             tts_config: None,
-            pending_voice: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            voice_chats: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         }
     }
 
@@ -500,85 +491,16 @@ impl Channel for WhatsAppWebChannel {
 
         let to = self.recipient_to_jid(&message.recipient)?;
 
-        // Voice chat mode: send text normally AND queue a voice note of the
-        // final answer. Only substantive messages (not tool outputs) are queued.
-        // A debounce task waits 10s after the last substantive message, then
-        // sends ONE voice note. Text in → text out. Voice in → text + voice out.
-        let is_voice_chat = self
-            .voice_chats
-            .lock()
-            .map(|vs| vs.contains(&message.recipient))
-            .unwrap_or(false);
-
-        if is_voice_chat && self.tts_config.is_some() {
-            let content = &message.content;
-            // Only queue substantive natural-language replies for voice.
-            // Skip tool outputs: URLs, JSON, code blocks, errors, short status.
-            let is_substantive = content.len() > 40
-                && !content.starts_with("http")
-                && !content.starts_with('{')
-                && !content.starts_with('[')
-                && !content.starts_with("Error")
-                && !content.contains("```")
-                && !content.contains("tool_call")
-                && !content.contains("wttr.in");
-
-            if is_substantive {
-                if let Ok(mut pv) = self.pending_voice.lock() {
-                    pv.insert(
-                        message.recipient.clone(),
-                        (content.clone(), std::time::Instant::now()),
-                    );
-                }
-
-                let pending = self.pending_voice.clone();
-                let voice_chats = self.voice_chats.clone();
-                let client_clone = client.clone();
-                let to_clone = to.clone();
-                let recipient = message.recipient.clone();
-                let tts_config = self.tts_config.clone().unwrap();
-                tokio::spawn(async move {
-                    // Wait 10 seconds — long enough for the agent to finish its
-                    // full tool chain and send the final answer.
-                    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-
-                    // Atomic check-and-remove: only one task gets the value
-                    let to_voice = pending.lock().ok().and_then(|mut pv| {
-                        if let Some((_, ts)) = pv.get(&recipient) {
-                            if ts.elapsed().as_secs() >= 8 {
-                                return pv.remove(&recipient).map(|(text, _)| text);
-                            }
-                        }
-                        None
-                    });
-
-                    if let Some(text) = to_voice {
-                        if let Ok(mut vc) = voice_chats.lock() {
-                            vc.remove(&recipient);
-                        }
-                        match Box::pin(WhatsAppWebChannel::synthesize_voice_static(
-                            &client_clone,
-                            &to_clone,
-                            &text,
-                            &tts_config,
-                        ))
-                        .await
-                        {
-                            Ok(()) => {
-                                tracing::info!(
-                                    "WhatsApp Web: voice reply sent ({} chars)",
-                                    text.len()
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!("WhatsApp Web: TTS voice reply failed: {e}");
-                            }
-                        }
-                    }
-                });
-            }
-            // Fall through to send text normally (voice chat gets BOTH)
-        }
+        // TTS voice reply: when enabled, synthesize voice after sending text.
+        let tts_enabled = self.tts_config.is_some();
+        let is_substantive = message.content.len() > 40
+            && !message.content.starts_with("http")
+            && !message.content.starts_with('{')
+            && !message.content.starts_with('[')
+            && !message.content.starts_with("Error")
+            && !message.content.contains("```")
+            && !message.content.contains("tool_call")
+            && !message.content.contains("wttr.in");
 
         // Send text message
         let outgoing = wa_rs_proto::whatsapp::Message {
@@ -586,12 +508,41 @@ impl Channel for WhatsAppWebChannel {
             ..Default::default()
         };
 
-        let message_id = client.send_message(to, outgoing).await?;
+        let message_id = client.send_message(to.clone(), outgoing).await?;
         tracing::debug!(
             "WhatsApp Web: sent text to {} (id: {})",
             message.recipient,
             message_id
         );
+
+        // Async TTS: synthesize and send voice note after text
+        if tts_enabled && is_substantive {
+            let client_clone = client.clone();
+            let to_clone = to;
+            let text_for_tts = message.content.clone();
+            let tts_config = self.tts_config.clone().unwrap();
+            tokio::spawn(async move {
+                match Box::pin(WhatsAppWebChannel::synthesize_voice_static(
+                    &client_clone,
+                    &to_clone,
+                    &text_for_tts,
+                    &tts_config,
+                ))
+                .await
+                {
+                    Ok(()) => {
+                        tracing::info!(
+                            "WhatsApp Web TTS: voice reply sent ({} chars)",
+                            text_for_tts.len()
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("WhatsApp Web TTS: voice reply failed: {e}");
+                    }
+                }
+            });
+        }
+
         Ok(())
     }
 
@@ -660,7 +611,6 @@ impl Channel for WhatsAppWebChannel {
             let session_revoked_clone = session_revoked.clone();
             let transcription_config = self.transcription.clone();
             let transcription_mgr = self.transcription_manager.clone();
-            let voice_chats = self.voice_chats.clone();
             let wa_mode = self.mode.clone();
             let wa_dm_policy = self.dm_policy.clone();
             let wa_group_policy = self.group_policy.clone();
@@ -678,7 +628,6 @@ impl Channel for WhatsAppWebChannel {
                     let session_revoked = session_revoked_clone.clone();
                     let transcription_config = transcription_config.clone();
                     let transcription_mgr = transcription_mgr.clone();
-                    let voice_chats = voice_chats.clone();
                     let wa_mode = wa_mode.clone();
                     let wa_dm_policy = wa_dm_policy.clone();
                     let wa_group_policy = wa_group_policy.clone();
@@ -804,14 +753,8 @@ impl Channel for WhatsAppWebChannel {
                                 // Track whether this chat used a voice note so we reply in kind.
                                 // We store the chat JID (reply_target) since that's what send() receives.
                                 let content = if let Some(ref vt) = voice_text {
-                                    if let Ok(mut vs) = voice_chats.lock() {
-                                        vs.insert(chat.clone());
-                                    }
                                     format!("[Voice] {vt}")
                                 } else {
-                                    if let Ok(mut vs) = voice_chats.lock() {
-                                        vs.remove(&chat);
-                                    }
                                     let text = msg.text_content().unwrap_or("");
                                     text.trim().to_string()
                                 };
