@@ -81,15 +81,19 @@ nanohtml2text = "0.2"
 # Optional Rust-native browser automation backend
 fantoccini = { version = "0.22.1", optional = true, default-features = false, features = ["rustls-tls"] }
 
+# MQTT client for IoT / SOP event fan-in
+rumqttc = "0.24"
+
+# Tarball extraction for binary updates
+flate2 = "1"
+tar = "0.4"
+
 # Progress bars (update pipeline)
 indicatif = "0.18"
 
 # Temp files (update pipeline rollback)
 tempfile = "3.26"
 
-# Tar/gzip extraction (update pipeline)
-flate2 = "1.1"
-tar = "0.4"
 
 # Zip extraction for ClawhHub / OpenClaw registry installers
 zip = { version = "8.1", default-features = false, features = ["deflate-flate2"] }
@@ -132,6 +136,9 @@ ring = "0.17"
 
 # Protobuf encode/decode (Lark WS frame codec, WhatsApp storage)
 prost = { version = "0.14", default-features = false, features = ["derive"], optional = true }
+
+# LRU cache for bounded sender state
+lru = "0.16"
 
 # Memory / persistence
 rusqlite = { version = "0.37", features = ["bundled"] }
